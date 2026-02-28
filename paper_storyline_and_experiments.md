@@ -85,6 +85,14 @@
   3. 对比分析：观察在不同任务中，小模型的平均熵分布差异。例如，写作任务的整体熵可能偏高（因为表达方式多样），导致大模型介入频繁，加速比下降；而推理任务的格式词熵极低，关键步骤熵高，更契合本方法的假设。
 * **预期结论**：明确 SP_entropy 的适用边界。如果发现在写作任务上效果衰减，可以作为 Limitation 探讨，或者引出针对不同任务自适应调整熵阈值 $\tau$ 的未来工作方向。
 
+### ⏳ 实验 9：正交性与即插即用验证 (Orthogonality & Plug-and-Play with SOTA)
+* **实验目的**：证明 SP_entropy 并非替代现有的构图/草稿生成（Drafting）优化方法，而是与之正交（Orthogonal），能够作为即插即用的模块进一步提升最新 SOTA 方法的性能。
+* **实验设计**：
+  1. 选取当前主流的非标准投机采样 SOTA 方法（如 Medusa, EAGLE, 或其他先进的动态草稿树生成方法）。这些方法主要致力于“生成更好的草稿（Better Drafting）”，而 SP_entropy 致力于“更智能的验证（Smarter Verification）”。
+  2. 将 SP_entropy 的基于熵的验证放宽机制直接叠加到 SOTA 方法的验证阶段，形成 `SOTA + SP_entropy` 的组合方案。
+  3. 严格对比纯 `SOTA` 和 `SOTA + SP_entropy` 在相同硬件和数据集上的 `tokens/sec` 和 `accept_ratio`，同时验证下游任务 Accuracy 是否保持一致。
+* **预期结论**：即使在当前最强的 SOTA 投机采样框架下，引入 SP_entropy 依然能带来“免费的额外提速（Free Speedup）”（例如在 SOTA 基础上再提升 10%-20% 的吞吐量）。这能够强有力地证明本方法的普适性（Universality）与架构无关性（Architecture-Agnostic），极大地提升论文的竞争力。
+
 ---
 
 ## 三、 进阶拓展探讨：从单一模型到基于熵的专家路由 (From Monolithic to Expert Routing)
