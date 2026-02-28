@@ -27,6 +27,15 @@ def speculative_sampling_entropy_based(
 
     all_entropies = []
     accepted_count, num_steps = 0, 0
+    
+    stats = {
+        "total_evaluated": 0,
+        "low_entropy_evaluated": 0,
+        "high_entropy_evaluated": 0,
+        "low_entropy_accepted": 0,
+        "high_entropy_accepted": 0,
+        "rescued_by_relaxation": 0
+    }
 
     # Prefill
     q_approx = approx_model._forward_with_kvcache(prefix)  # (1, vocab)
@@ -77,21 +86,45 @@ def speculative_sampling_entropy_based(
 
             draft_entropy = calculate_entropy(all_approx_probs[i].unsqueeze(0)).item()
             step_entropies.append(draft_entropy)
+            
+            stats["total_evaluated"] += 1
 
             if draft_entropy <= entropy_threshold:
+                stats["low_entropy_evaluated"] += 1
                 accept_ratio = torch.sqrt(p / q).clamp(max=1.0)
+                strict_ratio = (p / q).clamp(max=1.0)
+                
+                if r <= accept_ratio:
+                    stats["low_entropy_accepted"] += 1
+                    n += 1
+                    if r > strict_ratio:
+                        stats["rescued_by_relaxation"] += 1
+                        
+                    if eos_token_id is not None and token_id == eos_token_id:
+                        approx_model.rollback(base_len + n)
+                        target_model.rollback(base_len + n)
+                        all_entropies.extend(step_entropies)
+                        if kwargs.get('return_stats', False):
+                            return prefix[:, :base_len + n], accepted_count + n, num_steps, all_entropies, stats
+                        return prefix[:, :base_len + n], accepted_count + n, num_steps, all_entropies
+                else:
+                    break
             else:
+                stats["high_entropy_evaluated"] += 1
                 accept_ratio = (p / q).clamp(max=1.0)
-
-            if r <= accept_ratio:
-                n += 1
-                if eos_token_id is not None and token_id == eos_token_id:
-                    approx_model.rollback(base_len + n)
-                    target_model.rollback(base_len + n)
-                    all_entropies.extend(step_entropies)
-                    return prefix[:, :base_len + n], accepted_count + n, num_steps, all_entropies
-            else:
-                break
+                
+                if r <= accept_ratio:
+                    stats["high_entropy_accepted"] += 1
+                    n += 1
+                    if eos_token_id is not None and token_id == eos_token_id:
+                        approx_model.rollback(base_len + n)
+                        target_model.rollback(base_len + n)
+                        all_entropies.extend(step_entropies)
+                        if kwargs.get('return_stats', False):
+                            return prefix[:, :base_len + n], accepted_count + n, num_steps, all_entropies, stats
+                        return prefix[:, :base_len + n], accepted_count + n, num_steps, all_entropies
+                else:
+                    break
 
         # === D. Rollback & Resample ===
         approx_model.rollback(base_len + n)
@@ -118,4 +151,7 @@ def speculative_sampling_entropy_based(
     if verbose:
         accept_ratio = accepted_count / (num_steps * gamma) if num_steps > 0 else 0.0
         print(f"SP_entropy accept_ratio: {accept_ratio:.4f} accepted: {accepted_count} steps: {num_steps}")
+    
+    if kwargs.get('return_stats', False):
+        return prefix, accepted_count, num_steps, all_entropies, stats
     return prefix, accepted_count, num_steps, all_entropies
