@@ -20,6 +20,8 @@ def speculative_sampling_entropy_based(
     entropy_threshold: float = 2.5,
     eos_token_id: int = None,
     verbose: bool = False,
+    relaxation_strategy: str = 'sqrt', # 'sqrt' or 'add_0.5'
+    dynamic_gamma: bool = False,
     **kwargs
 ) -> tuple:
     approx_model = KVCacheModel(approx_model_raw, temperature, top_k, top_p)
@@ -27,6 +29,7 @@ def speculative_sampling_entropy_based(
 
     all_entropies = []
     accepted_count, num_steps = 0, 0
+    total_drafted = 0
     
     stats = {
         "total_evaluated": 0,
@@ -63,21 +66,28 @@ def speculative_sampling_entropy_based(
             draft_tokens.append(token)
             draft_probs.append(q.squeeze(0))  # (vocab,)
             prefix = torch.cat([prefix, token], dim=1)
+            
+            if dynamic_gamma:
+                draft_entropy = calculate_entropy(q).item()
+                if draft_entropy > entropy_threshold:
+                    break
 
+        actual_gamma = len(draft_tokens)
+        total_drafted += actual_gamma
         draft_seq = torch.cat(draft_tokens, dim=1)
-        all_approx_probs = torch.stack(draft_probs, dim=0)  # (gamma, vocab)
+        all_approx_probs = torch.stack(draft_probs, dim=0)  # (actual_gamma, vocab)
 
         # === B. Verify: single target forward with [next_token, draft_seq] ===
-        verify_input = torch.cat([next_token, draft_seq], dim=1)  # (1, gamma+1)
-        target_out = target_model._forward_with_kvcache(verify_input)  # (1, gamma+1, vocab)
+        verify_input = torch.cat([next_token, draft_seq], dim=1)  # (1, actual_gamma+1)
+        target_out = target_model._forward_with_kvcache(verify_input)  # (1, actual_gamma+1, vocab)
         if target_out.dim() == 2:
             target_out = target_out.unsqueeze(0)
-        all_target_probs = target_out.squeeze(0)  # (gamma+1, vocab)
+        all_target_probs = target_out.squeeze(0)  # (actual_gamma+1, vocab)
 
         # === C. Entropy-based acceptance ===
         n = 0
         step_entropies = []
-        for i in range(gamma):
+        for i in range(actual_gamma):
             r = torch.rand(1, device=prefix.device)
             token_id = draft_tokens[i].squeeze().item()
 
@@ -91,7 +101,14 @@ def speculative_sampling_entropy_based(
 
             if draft_entropy <= entropy_threshold:
                 stats["low_entropy_evaluated"] += 1
-                accept_ratio = torch.sqrt(p / q).clamp(max=1.0)
+                
+                if relaxation_strategy == 'add_0.5':
+                    accept_ratio = (p / q + 0.5).clamp(max=1.0)
+                elif relaxation_strategy == 'aggressive':
+                    accept_ratio = torch.tensor(1.0, device=p.device)
+                else: # default is 'sqrt'
+                    accept_ratio = torch.sqrt(p / q).clamp(max=1.0)
+                    
                 strict_ratio = (p / q).clamp(max=1.0)
                 
                 if r <= accept_ratio:
@@ -132,7 +149,7 @@ def speculative_sampling_entropy_based(
 
         all_entropies.extend(step_entropies[:n])
 
-        if n < gamma:
+        if n < actual_gamma:
             p_dist = all_target_probs[n]
             q_dist = all_approx_probs[n]
             diff_probs = torch.clamp(p_dist - q_dist, min=1e-9)
@@ -149,8 +166,8 @@ def speculative_sampling_entropy_based(
             break
 
     if verbose:
-        accept_ratio = accepted_count / (num_steps * gamma) if num_steps > 0 else 0.0
-        print(f"SP_entropy accept_ratio: {accept_ratio:.4f} accepted: {accepted_count} steps: {num_steps}")
+        accept_ratio = accepted_count / total_drafted if total_drafted > 0 else 0.0
+        print(f"SP_entropy accept_ratio: {accept_ratio:.4f} accepted: {accepted_count} steps: {num_steps} avg_gamma: {total_drafted/num_steps:.2f}")
     
     if kwargs.get('return_stats', False):
         return prefix, accepted_count, num_steps, all_entropies, stats
